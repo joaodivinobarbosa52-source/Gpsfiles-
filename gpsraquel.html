@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>AgroSystem Pro</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+  * { box-sizing:border-box; margin:0; padding:0 }
+  html, body { height: 100%; width: 100%; overflow: hidden; font-family:sans-serif; background:#0d1117; }
+  body { display: flex; flex-direction: column; }
+  #header { background:linear-gradient(135deg,#1b4332,#2d6a4f); padding:10px 16px; display:flex; align-items:center; flex-shrink: 0; box-shadow:0 2px 8px #000; }
+  #header h1 { font-size:15px; color:#fff }
+  #map { flex: 1; width: 100%; z-index: 1; background:#000; }
+  .panel { background:#161b22; padding:12px; display:flex; flex-direction:column; gap:8px; border-top:1px solid #30363d; flex-shrink: 0; padding-bottom: env(safe-area-inset-bottom, 12px); }
+  .row { display:flex; gap:8px; width: 100%; }
+  select, input[type=date] { flex: 1; min-width: 0; padding: 10px; border-radius:10px; border:1px solid #30363d; background:#0d1117; color:#e0e0e0; font-size:13px; height: 44px; outline:none; }
+  button { flex: 1; height: 44px; border:none; border-radius:10px; color:#fff; font-weight:700; font-size:13px; cursor:pointer; display:flex; align-items:center; justify-content:center; }
+  .btn-today { background:#4a148c; flex: 0 0 auto; padding: 0 12px; }
+  .btn-gps { background:#1565c0; }
+  .btn-update { background:#1b5e20; }
+  button:active { transform:scale(.95); }
+  button:disabled { opacity:.5; }
+  #legend { position:absolute; bottom:140px; right:10px; background:#161b22ee; border:1px solid #30363d; border-radius:12px; padding:10px; font-size:11px; z-index:1000; pointer-events:none; }
+  .li { display:flex; align-items:center; gap:7px; margin:3px 0 }
+  .lc { width:18px; height:10px; border-radius:3px; }
+  #toast { position:fixed; top:70px; left:50%; transform:translateX(-50%); background:#0d1117; color:#95d5b2; padding:8px 20px; border-radius:20px; font-size:12px; z-index:2000; border:1px solid #2d6a4f; opacity:0; transition:0.3s; pointer-events:none; }
+</style>
+</head>
+<body>
+
+<div id="header">
+  <span style="font-size:20px; margin-right:8px">🌿</span>
+  <h1>AgroSystem Pro</h1>
+</div>
+
+<div id="map"></div>
+<div id="legend"></div>
+<div id="toast"></div>
+
+<div class="panel">
+  <div class="row">
+    <select id="layer" onchange="updateLegend()">
+      <option value="NDVI">🌱 NDVI (Saúde da Planta)</option>
+      <option value="TRUE-COLOR">🖼️ Cor Real (Natural)</option>
+      <option value="LAND-TEMP">🌡️ Temperatura do Solo</option>
+    </select>
+    <button class="btn-today" onclick="setToday()">📅 Hoje</button>
+  </div>
+  <div class="row">
+    <input type="date" id="date">
+    <button class="btn-gps" onclick="goToMyLocation()">📍 Onde estou</button>
+    <button class="btn-update" id="btnUpdate" onclick="updateLayer()">🛰️ Carregar</button>
+  </div>
+</div>
+
+<script>
+const GIBS = {
+  'NDVI': { tpl: d => `https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/MODIS_Terra_NDVI_8Day/default/${d}/GoogleMapsCompatible/{z}/{y}/{x}.png`, legend: { title: 'Saúde (NDVI)', items: [{c:'#005a00', l:'Excelente'},{c:'#1a9641', l:'Bom'},{c:'#ffffbf', l:'Baixo'},{c:'#d7191c', l:'Solo'}] } },
+  'TRUE-COLOR': { tpl: d => `https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/VIIRS_SNPP_CorrectedReflectance_TrueColor/default/${d}/GoogleMapsCompatible/{z}/{y}/{x}.jpg`, legend: { title: 'Cor Real', items: [{c:'#226622', l:'Verde'},{c:'#ffffff', l:'Nuvens'}] } },
+  'LAND-TEMP': { tpl: d => `https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/MODIS_Terra_Land_Surface_Temp_Day/default/${d}/GoogleMapsCompatible/{z}/{y}/{x}.png`, legend: { title: 'Temp °C', items: [{c:'#67001f', l:'Quente'},{c:'#053061', l:'Frio'}] } }
+};
+
+const map = L.map('map', { zoomControl: false }).setView([39.8, -98.5], 4); // Começa nos EUA
+L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}').addTo(map);
+
+let currentLayer = null;
+let isLoading = false;
+
+function toast(msg) {
+  const el = document.getElementById('toast');
+  el.innerText = msg; el.style.opacity = 1;
+  setTimeout(() => el.style.opacity = 0, 3000);
+}
+
+// FUNÇÃO CHAVE: Ajusta a data para o ciclo da NASA
+function adjustDateForNASA(dateStr) {
+  const date = new Date(dateStr);
+  const startOfYear = new Date(date.getFullYear(), 0, 1);
+  const dayOfYear = Math.floor((date - startOfYear) / 86400000);
+  const snappedDay = Math.floor(dayOfYear / 8) * 8 + 1;
+  const snappedDate = new Date(date.getFullYear(), 0, snappedDay);
+  return snappedDate.toISOString().split('T')[0];
+}
+
+function setToday() {
+  const d = new Date(); d.setDate(d.getDate() - 3);
+  document.getElementById('date').value = d.toISOString().split('T')[0];
+  updateLayer();
+}
+
+function updateLegend() {
+  const type = document.getElementById('layer').value;
+  const leg = GIBS[type].legend;
+  document.getElementById('legend').innerHTML = `<h4>${leg.title}</h4>` + leg.items.map(i => `<div class="li"><div class="lc" style="background:${i.c}"></div><span>${i.l}</span></div>`).join('');
+}
+
+function updateLayer() {
+  if (isLoading) return;
+  const type = document.getElementById('layer').value;
+  let dateVal = document.getElementById('date').value;
+  if (!dateVal) return toast('⚠️ Selecione uma data');
+
+  // Ajusta a data apenas para o NDVI
+  if (type === 'NDVI') {
+    const adjusted = adjustDateForNASA(dateVal);
+    if (adjusted !== dateVal) {
+      dateVal = adjusted;
+      document.getElementById('date').value = adjusted;
+      toast('📅 Data ajustada para o ciclo do satélite');
+    }
+  }
+
+  if (currentLayer) map.removeLayer(currentLayer);
+  
+  isLoading = true;
+  document.getElementById('btnUpdate').innerText = "⏳...";
+  document.getElementById('btnUpdate').disabled = true;
+
+  currentLayer = L.tileLayer(GIBS[type].tpl(dateVal), { maxZoom: 9, opacity: 0.8 }).addTo(map);
+
+  currentLayer.on('tileload', () => {
+    isLoading = false;
+    document.getElementById('btnUpdate').innerText = "🛰️ Carregar";
+    document.getElementById('btnUpdate').disabled = false;
+  });
+
+  setTimeout(() => { if(isLoading) { isLoading = false; document.getElementById('btnUpdate').disabled = false; document.getElementById('btnUpdate').innerText = "🛰️ Carregar"; toast('❌ Sem dados nessa data'); } }, 8000);
+}
+
+function goToMyLocation() {
+  navigator.geolocation.getCurrentPosition((pos) => {
+    map.flyTo([pos.coords.latitude, pos.coords.longitude], 14);
+    toast('📍 Centralizado na sua posição');
+  }, () => toast('❌ Ative o GPS'));
+}
+
+// Iniciar com dados de Fevereiro como você pediu
+document.getElementById('date').value = "2024-02-10";
+updateLegend();
+</script>
+</body>
+</html>
